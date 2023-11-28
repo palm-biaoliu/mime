@@ -16,7 +16,7 @@ See the `README.md` file in the `data` directory for instructions on downloading
 For example, training the model on dataset pascal, loss VIB, learning rate 0.0001, feature dimension 256, batch size 32
 
 ```
-python train_vib.py -d pascal
+python train_mime.py -d pascal
 ```
 
 ## Citing this work
