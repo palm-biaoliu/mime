@@ -51,6 +51,8 @@ def run_train_phase(model, P, Z, logger, epoch, phase):
     assert phase == 'train'
     model.train()
 
+    if epoch > P['warmup_epoch']:
+        Z['datasets']['train'].label_matrix_obs = Z['pseudo_label_matrix_obs']
     for batch in Z['dataloaders'][phase]:
         # move data to GPU: 
         batch['image'] = batch['image'].to(Z['device'], non_blocking=True)
@@ -71,6 +73,8 @@ def run_train_phase(model, P, Z, logger, epoch, phase):
         Z['optimizer'].step()
         # save current batch data:
         logger.update_phase_data(batch)
+    if epoch > P['warmup_epoch']:
+        Z['datasets']['train'].label_matrix_obs = Z['tmp_obs']
 
 
 def run_eval_phase(model, P, Z, logger, epoch, phase):
@@ -106,8 +110,9 @@ def run_eval_phase(model, P, Z, logger, epoch, phase):
         logger.update_phase_data(batch)
 
 def set_pseudo_labeling(model, P, Z, logger, epoch, phase):
+
     assert phase == 'train'
-    model.eval()
+    model.train()
 
     total_preds = None
     total_idx = None
@@ -122,7 +127,7 @@ def set_pseudo_labeling(model, P, Z, logger, epoch, phase):
 
         # forward pass:
         with torch.set_grad_enabled(False):
-            batch['logits'], _, _ = model(batch['image'])
+            batch['logits'],_,_ = model(batch['image'])
             batch['preds'] = torch.sigmoid(batch['logits'])
             if batch['preds'].dim() == 1:
                 batch['preds'] = torch.unsqueeze(batch['preds'], 0)
@@ -134,10 +139,38 @@ def set_pseudo_labeling(model, P, Z, logger, epoch, phase):
         else:
             total_preds = np.vstack((batch['preds'].detach().cpu().numpy(), total_preds))
             total_idx = np.hstack((batch['idx'].cpu().numpy(), total_idx))
-    label_mtx = np.zeros_like(total_preds)
-    label_mtx[total_preds > P['theta']] = 1
-    Z['datasets']['train'].label_matrix_obs[total_idx] += label_mtx
-    Z['datasets']['train'].label_matrix_obs[Z['datasets']['train'].label_matrix_obs > 1] = 1
+
+            # pseudo-label:
+            if P['batch'] >= P['steps_per_epoch'] - 1:
+                total_estimate = count_estimate_(args)
+
+                Z['pseudo_label_matrix_obs'] = np.zeros_like(Z['datasets']['train'].label_matrix_obs)
+                for i in range(total_preds.shape[1]):  # class-wise
+
+                    class_preds = total_preds[:, i]
+
+                    # else:
+                    class_labels_obs = Z['datasets']['train'].label_matrix_obs[:, i]
+                    class_labels_obs = class_labels_obs[total_idx]
+
+                    # # # select unlabel data:
+                    unlabel_class_preds = class_preds[class_labels_obs == 0]
+                    unlabel_class_idx = total_idx[class_labels_obs == 0]
+
+                    class_estimate = total_estimate[i]
+
+                    pseudo_positive_num = int(class_estimate * total_preds.shape[0])
+
+                    # select samples:
+                    sorted_idx_loc = np.flipud(np.argsort(unlabel_class_preds))
+                    selected_idx_loc = sorted_idx_loc[:pseudo_positive_num]  # select indices
+
+                    for j in range(0,total_preds.shape[0]):
+                        if(Z['tmp_obs'][j,i]==1):
+                            Z['pseudo_label_matrix_obs'][j, i] = 1
+
+                    for loc in selected_idx_loc:
+                        Z['pseudo_label_matrix_obs'][unlabel_class_idx[loc], i] = -1
 
 def train(model, P, Z):
     '''
@@ -236,8 +269,12 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
         gb_logger.info('observed negatives: {} total, {:.2f} per example on average.'.format(obs_total_neg,
                                                                                              obs_total_neg / num_examples))
 
+        Z['pseudo_label_matrix_obs'] = np.zeros_like(Z['datasets']['train'].label_matrix_obs)
+        Z['tmp_obs'] = Z['datasets']['train'].label_matrix_obs
+
         # save dataset-specific parameters:
         P['num_classes'] = Z['datasets']['train'].num_classes
+
 
         # dataloaders:
         Z['dataloaders'] = {}
